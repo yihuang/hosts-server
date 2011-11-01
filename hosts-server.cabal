@@ -1,0 +1,25 @@
+name:                hosts-server
+version:             0.1.0.0
+synopsis:            An dns server which is extremely easy to config.
+-- description:         
+homepage:            http://www.yi-programmer.com/blog/
+license:             GPL-3
+license-file:        LICENSE
+author:              yihuang
+maintainer:          yi.codeplayer@gmail.com
+category:            Network
+build-type:          Simple
+cabal-version:       >=1.8
+
+executable hosts-server
+  GHC-Options:       -Wall
+  main-is:           Main.hs
+  build-depends:
+      base
+    , network
+    , data-default
+    , bytestring
+    , attoparsec
+    , iproute >= 1.2.4 && < 1.3.0
+    , dns >= 0.3.0 && < 0.4.0
+
