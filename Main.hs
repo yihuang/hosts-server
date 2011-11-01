@@ -14,42 +14,44 @@ import Network.Socket.ByteString (sendAll, sendAllTo, recvFrom)
 import Network.Socket hiding (recvFrom)
 import Network.DNS
 import Data.Attoparsec.Char8
-import qualified Data.ByteString.Char8 as S
+import qualified Data.ByteString.Char8 as B
 import qualified Data.ByteString.Lazy as BL
 
 type Host = (Domain, IPv4)
 
 data Conf = Conf
-  { bufSize :: Int
-  , timeOut :: Int
+  { bufSize     :: Int
+  , timeOut     :: Int
   , nameservers :: [HostName]
-  , hosts   :: [Host]
+  , hosts       :: [Host]
   }
 
 instance Default Conf where
     def = Conf
-      { bufSize = 512
-      , timeOut = 10 * 1000 * 1000
-      , nameservers = ["192.168.1.1"]
-      , hosts   = [("localhost.", "127.0.0.1")]
+      { bufSize     = 512
+      , timeOut     = 10 * 1000 * 1000
+      , nameservers = []
+      , hosts       = []
       }
 
 {--
  - Timeout with error message.
  -}
-timeout' :: String -> Int -> IO a -> IO (Maybe a)
+timeout' :: String -> Int -> IO a -> IO (Either String a)
 timeout' msg tm io = do
-    result <- timeout tm io
-    maybe (putStrLn msg) (\_ -> return ()) result
-    return result
+    r <- timeout tm io
+    case r of
+        Nothing -> return $ Left msg
+        Just a  -> return $ Right a
 
 {--
  - Proxy dns request to a real dns server.
  -}
-proxyRequest :: Conf -> ResolvConf -> DNSFormat -> IO (Maybe DNSFormat)
-proxyRequest Conf{..} rc req = do
-    let worker Resolver{..} = do
-            let packet = S.concat . BL.toChunks $ encode req
+proxyRequest :: Conf -> HostName -> DNSFormat -> IO (Either String DNSFormat)
+proxyRequest Conf{..} server req = do
+    let rc = defaultResolvConf { resolvInfo = RCHostName server }
+        worker Resolver{..} = do
+            let packet = B.concat . BL.toChunks $ encode req
             sendAll dnsSock packet
             receive dnsSock dnsBufsize
     rs <- makeResolvSeed rc
@@ -57,45 +59,47 @@ proxyRequest Conf{..} rc req = do
         (>>= check) <$> timeout' "proxy request timeout" timeOut (worker r)
   where
     ident = identifier . header $ req
-    check :: DNSFormat -> Maybe DNSFormat
+    check :: DNSFormat -> Either String DNSFormat
     check rsp = let hdr = header rsp
                 in  if identifier hdr == ident
-                        then Just rsp
-                        else Nothing
+                        then Right rsp
+                        else Left "identifier not match"
 
 {--
- - Handle A request configured in hosts, and proxy other requests to real dns server.
+ - Handle A query for domain suffixes configured, and proxy other requests to real dns server.
  -}
-handleRequest :: Conf -> ResolvConf -> DNSFormat -> IO (Maybe DNSFormat)
-handleRequest conf@Conf{hosts=hosts} rc req =
-    maybe
-    (proxyRequest conf rc req)
-    (return . Just)
-    mResponse
+handleRequest :: Conf -> DNSFormat -> IO (Either String DNSFormat)
+handleRequest conf req =
+    case lookupHosts of
+        (Just rsp) -> return $ Right rsp
+        Nothing  -> maybe
+                    (return $ Left "nameserver not configured.")
+                    (\srv -> proxyRequest conf srv req)
+                    (listToMaybe (nameservers conf))
   where
     filterA = filter ((==A) . qtype)
-    filterHost dom = filter (\(h, _) -> h `S.isSuffixOf` dom)
+    filterHost dom = filter (\(h, _) -> h `B.isSuffixOf` dom)
     ident = identifier . header $ req
-    mResponse = do
+    lookupHosts :: Maybe DNSFormat
+    lookupHosts = do
         q <- listToMaybe . filterA . question $ req
-        (_, ip) <- listToMaybe . filterHost (qname q) $ hosts
+        (_, ip) <- listToMaybe . filterHost (qname q) $ hosts conf
         return $ responseA ident q ip
 
 {--
  - Parse request and compose response.
  -}
-handlePacket :: Conf -> Socket -> SockAddr -> S.ByteString -> IO ()
+handlePacket :: Conf -> Socket -> SockAddr -> B.ByteString -> IO ()
 handlePacket conf@Conf{..} sock addr s =
     either
     (putStrLn . ("decode fail:"++))
     (\req -> do
-        let rc = defaultResolvConf { resolvInfo = RCHostName (head nameservers) }
-        handleRequest conf rc req >>=
-            maybe
-            (return ())
-            (\rsp -> let packet = S.concat . BL.toChunks $ encode rsp
+        handleRequest conf req >>=
+            either
+            putStrLn
+            (\rsp -> let packet = B.concat . BL.toChunks $ encode rsp
                      in  timeout' "send response timeout" timeOut (sendAllTo sock packet addr)
-                         >> return ()
+                         >>= either putStrLn (\_ -> return ())
             )
     )
     (decode (BL.fromChunks [s]))
@@ -112,12 +116,15 @@ run conf = withSocketsDo $ do
         (s, addr) <- recvFrom sock (bufSize conf)
         forkIO $ handlePacket conf sock addr s
 
+{--
+ - parse config file.
+ -}
 readHosts :: FilePath -> IO ([Host], [HostName])
 readHosts filename =
-    S.readFile filename >>= either (fail . ("parse hosts fail:"++)) return . parseHosts
+    B.readFile filename >>= either (fail . ("parse hosts fail:"++)) return . parseHosts
   where
-    parseHosts :: S.ByteString -> Either String ([Host], [HostName])
-    parseHosts s = let (serverLines, hostLines) = partition (S.isPrefixOf "nameserver") (S.lines s)
+    parseHosts :: B.ByteString -> Either String ([Host], [HostName])
+    parseHosts s = let (serverLines, hostLines) = partition (B.isPrefixOf "nameserver") (B.lines s)
                    in  (,) <$> mapM (parseOnly host) hostLines
                            <*> mapM (parseOnly nameserver) serverLines
 
@@ -136,7 +143,7 @@ readHosts filename =
         _ <- string "nameserver"
         _ <- space
         skipSpace
-        S.unpack <$> takeWhile (not . isSpace)
+        B.unpack <$> takeWhile (not . isSpace)
 
 main :: IO ()
 main = do

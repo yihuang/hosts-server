@@ -22,6 +22,6 @@ Usage
 
 ::
 
-    hosts-server /your/path/to/config
+    hosts-server [CONFIG_FILE]
 
 The only argument is the path to your config file, default to "./hosts".
