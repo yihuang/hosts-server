@@ -34,15 +34,8 @@ instance Default Conf where
       , hosts       = []
       }
 
-{--
- - Timeout with error message.
- -}
-timeout' :: String -> Int -> IO a -> IO (Either String a)
-timeout' msg tm io = do
-    r <- timeout tm io
-    case r of
-        Nothing -> return $ Left msg
-        Just a  -> return $ Right a
+toEither :: a -> Maybe b -> Either a b
+toEither a = maybe (Left a) Right
 
 {--
  - Proxy dns request to a real dns server.
@@ -56,7 +49,7 @@ proxyRequest Conf{..} server req = do
             receive dnsSock dnsBufsize
     rs <- makeResolvSeed rc
     withResolver rs $ \r ->
-        (>>= check) <$> timeout' "proxy request timeout" timeOut (worker r)
+        (>>= check) . toEither "proxy request timeout" <$> timeout timeOut (worker r)
   where
     ident = identifier . header $ req
     check :: DNSFormat -> Either String DNSFormat
@@ -98,8 +91,8 @@ handlePacket conf@Conf{..} sock addr s =
             either
             putStrLn
             (\rsp -> let packet = B.concat . BL.toChunks $ encode rsp
-                     in  timeout' "send response timeout" timeOut (sendAllTo sock packet addr)
-                         >>= either putStrLn (\_ -> return ())
+                     in  timeout timeOut (sendAllTo sock packet addr) >>=
+                         maybe (putStrLn "send response timeout") return
             )
     )
     (decode (BL.fromChunks [s]))
