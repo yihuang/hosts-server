@@ -46,7 +46,7 @@ proxyRequest Conf{..} server req = do
         worker Resolver{..} = do
             let packet = B.concat . BL.toChunks $ encode req
             sendAll dnsSock packet
-            receive dnsSock dnsBufsize
+            receive dnsSock
     rs <- makeResolvSeed rc
     withResolver rs $ \r ->
         (>>= check) . toEither "proxy request timeout" <$> timeout timeOut (worker r)
